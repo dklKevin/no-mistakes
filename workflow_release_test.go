@@ -3,6 +3,9 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -153,41 +156,89 @@ func TestReleaseWorkflowDoesNotOverrideReleaseType(t *testing.T) {
 }
 
 func TestReleaseWorkflowPublishesDraftOnlyAfterAssetsComplete(t *testing.T) {
-	data, err := os.ReadFile(".github/workflows/release.yml")
-	if err != nil {
-		t.Fatalf("read workflow: %v", err)
+	wf := loadReleaseWorkflowDoc(t)
+	finalize := wf.Jobs["finalize"]
+	if finalize == nil {
+		t.Fatal("release workflow has no finalize job")
 	}
-	content := string(data)
-
-	block := extractJobBlock(t, content, "finalize")
-
-	required := []string{
+	for _, want := range []string{
 		"!cancelled()",
 		"needs.release-please.result == 'success'",
+		"needs.build-darwin.result == 'success'",
 		"needs.build-and-upload.result == 'success'",
 		"needs.checksums.result == 'success'",
 		"needs.release-please.outputs.release_created == 'true'",
-		"gh release edit",
-		"--draft=false",
-		"--prerelease=false",
-		"--latest=true",
-		"--prerelease=true",
-		"--latest=false",
-	}
-	for _, req := range required {
-		if !strings.Contains(block, req) {
-			t.Fatalf("finalize job must contain %q so a draft is published only after every asset job succeeds, and stable tags become GitHub latest", req)
+	} {
+		if !strings.Contains(finalize.If, want) {
+			t.Fatalf("finalize job condition missing %q: %q", want, finalize.If)
 		}
 	}
-	if !strings.Contains(block, "*-*") {
-		t.Fatalf("finalize job must treat hyphenated semver tags as intentional prereleases")
+	for _, dep := range []string{"release-please", "build-darwin", "build-and-upload", "checksums"} {
+		found := false
+		for _, actual := range finalize.needs() {
+			if actual == dep {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("finalize job must declare %q in needs so its gate sees all upstream results: %v", dep, finalize.needs())
+		}
 	}
 
-	for _, dep := range []string{"release-please", "build-and-upload", "checksums"} {
-		if !strings.Contains(block, "- "+dep) {
-			t.Fatalf("finalize job must declare %q in needs so its gate sees all upstream results", dep)
+	cases := []struct {
+		tag  string
+		want string
+	}{
+		{tag: "v1.2.3", want: "release edit v1.2.3 --draft=false --prerelease=false --latest=true"},
+		{tag: "v1.2.3-beta.1", want: "release edit v1.2.3-beta.1 --draft=false --prerelease=true --latest=false"},
+	}
+	for _, tc := range cases {
+		if got := runReleaseFinalizeScript(t, finalize, tc.tag); got != tc.want {
+			t.Errorf("finalize for %s invoked gh as %q, want %q", tc.tag, got, tc.want)
 		}
 	}
+}
+
+func runReleaseFinalizeScript(t *testing.T, job *wfJob, tag string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("release workflow finalize scripts run under bash on GitHub's Linux runner")
+	}
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash is required to execute the release finalize script: %v", err)
+	}
+
+	var script string
+	for _, step := range job.Steps {
+		if step.Name == "Publish draft release" {
+			script = step.Run
+			break
+		}
+	}
+	if script == "" {
+		t.Fatal("finalize job has no publish step")
+	}
+
+	fakeBin := t.TempDir()
+	writeExecutable(t, filepath.Join(fakeBin, "gh"), `#!/bin/sh
+printf '%s\n' "$*" > "$GH_LOG"
+`)
+	logPath := filepath.Join(t.TempDir(), "gh.log")
+	cmd := exec.Command("bash", "-c", script)
+	cmd.Env = append(os.Environ(),
+		"TAG="+tag,
+		"GH_LOG="+logPath,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("finalize script for %s failed: %v\n%s", tag, err, output)
+	}
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(data))
 }
 
 func TestExtractJobBlockHandlesCRLF(t *testing.T) {

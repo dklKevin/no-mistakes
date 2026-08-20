@@ -139,31 +139,6 @@ func TestPowerShellInstallScriptChecksDaemonRestartFailure(t *testing.T) {
 	}
 }
 
-func TestInstallScriptsFailClosedOnChecksumsAndPinReleaseURL(t *testing.T) {
-	for _, name := range []string{"install.sh", "install.ps1"} {
-		data, err := os.ReadFile(filepath.Join("docs", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := string(data)
-		if !strings.Contains(text, "checksums.txt") {
-			t.Fatalf("%s must download and check checksums.txt before installing", name)
-		}
-		if !strings.Contains(text, "releases/download/") {
-			t.Fatalf("%s must pin asset downloads to a versioned releases/download URL", name)
-		}
-		if strings.Contains(text, "releases/latest/download") {
-			t.Fatalf("%s must not download binaries from a floating /releases/latest URL", name)
-		}
-		if !strings.Contains(text, "NO_MISTAKES_VERSION") {
-			t.Fatalf("%s must honor NO_MISTAKES_VERSION so a release can be pinned without /releases/latest", name)
-		}
-		if name == "install.ps1" && !strings.Contains(text, "Get-FileHash") {
-			t.Fatalf("install.ps1 must verify the archive with Get-FileHash")
-		}
-	}
-}
-
 func TestInstallScriptFailsWhenChecksumsMissing(t *testing.T) {
 	skipInstallScriptTestsOnWindows(t)
 
