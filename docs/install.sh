@@ -29,20 +29,69 @@ case "$ARCH" in
   *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+if [ -n "${NO_MISTAKES_VERSION:-}" ]; then
+  VERSION="$NO_MISTAKES_VERSION"
+else
+  VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+fi
 if [ -z "$VERSION" ]; then
   echo "Could not determine latest release"
   exit 1
 fi
+case "$VERSION" in
+  *[!A-Za-z0-9._-]*)
+    echo "Invalid release version: ${VERSION}"
+    exit 1
+    ;;
+esac
 
 FILENAME="no-mistakes-${VERSION}-${OS}-${ARCH}.tar.gz"
-URL="https://github.com/${REPO}/releases/download/${VERSION}/${FILENAME}"
+ASSET_BASE="https://github.com/${REPO}/releases/download/${VERSION}"
+URL="${ASSET_BASE}/${FILENAME}"
+CHECKSUMS_URL="${ASSET_BASE}/checksums.txt"
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "Downloading no-mistakes ${VERSION} for ${OS}/${ARCH}..."
 curl -fsSL "$URL" -o "${TMPDIR}/${FILENAME}"
+curl -fsSL "$CHECKSUMS_URL" -o "${TMPDIR}/checksums.txt"
+
+verify_archive_checksum() {
+  archive="$1"
+  checksums="$2"
+  filename="$3"
+
+  if [ ! -s "$checksums" ]; then
+    echo "checksums.txt is missing or empty"
+    exit 1
+  fi
+
+  expected="$(awk -v f="$filename" '$2 == f { print $1; found=1 } END { if (!found) exit 1 }' "$checksums")" || {
+    echo "checksums.txt has no entry for ${filename}"
+    exit 1
+  }
+  if [ -z "$expected" ]; then
+    echo "checksums.txt has no entry for ${filename}"
+    exit 1
+  fi
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$archive" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+  else
+    echo "no SHA-256 tool found (sha256sum or shasum)"
+    exit 1
+  fi
+
+  if [ "$actual" != "$expected" ]; then
+    echo "checksum mismatch for ${filename}: got ${actual} want ${expected}"
+    exit 1
+  fi
+}
+
+verify_archive_checksum "${TMPDIR}/${FILENAME}" "${TMPDIR}/checksums.txt" "$FILENAME"
 tar xzf "${TMPDIR}/${FILENAME}" -C "$TMPDIR"
 
 if ! mkdir -p "$INSTALL_DIR"; then
