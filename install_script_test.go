@@ -151,7 +151,7 @@ func TestInstallScriptFailsWhenChecksumsMissing(t *testing.T) {
 	}
 
 	output, err := runInstallScriptCommand(t, home, fakeBin, map[string]string{
-		"FAKE_RELEASE_ARCHIVE": archivePath,
+		"FAKE_RELEASE_ARCHIVE":   archivePath,
 		"FAKE_MISSING_CHECKSUMS": "1",
 	})
 	if err == nil {
