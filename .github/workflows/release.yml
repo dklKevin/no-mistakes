@@ -339,9 +339,23 @@ jobs:
       needs.checksums.result == 'success' &&
       needs.release-please.outputs.release_created == 'true'
     steps:
-      - name: Publish draft release as prerelease
+      - name: Publish draft release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: gh release edit "$TAG" --draft=false --prerelease=true
+        run: |
+          set -euo pipefail
+          # Semver prerelease identifiers follow '-' (v1.55.0-rc.1).
+          # Stable tags like v1.55.0 must publish as full releases so
+          # /releases/latest and the changelog stay aligned. Upstream
+          # finalize always forced --prerelease=true, which left 1.54
+          # and 1.55 marked prerelease after they shipped as stable.
+          case "$TAG" in
+            *-*)
+              gh release edit "$TAG" --draft=false --prerelease=true
+              ;;
+            *)
+              gh release edit "$TAG" --draft=false --prerelease=false
+              ;;
+          esac

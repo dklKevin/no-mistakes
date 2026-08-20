@@ -152,7 +152,7 @@ func TestReleaseWorkflowDoesNotOverrideReleaseType(t *testing.T) {
 	}
 }
 
-func TestReleaseWorkflowPublishesPrereleaseOnlyAfterAssetsComplete(t *testing.T) {
+func TestReleaseWorkflowPublishesDraftOnlyAfterAssetsComplete(t *testing.T) {
 	data, err := os.ReadFile(".github/workflows/release.yml")
 	if err != nil {
 		t.Fatalf("read workflow: %v", err)
@@ -169,11 +169,10 @@ func TestReleaseWorkflowPublishesPrereleaseOnlyAfterAssetsComplete(t *testing.T)
 		"needs.release-please.outputs.release_created == 'true'",
 		"gh release edit",
 		"--draft=false",
-		"--prerelease=true",
 	}
 	for _, req := range required {
 		if !strings.Contains(block, req) {
-			t.Fatalf("finalize job must contain %q so a draft is only published as prerelease after every asset job succeeds", req)
+			t.Fatalf("finalize job must contain %q so a draft is only published after every asset job succeeds", req)
 		}
 	}
 	if strings.Contains(block, "--latest=true") {
@@ -184,6 +183,28 @@ func TestReleaseWorkflowPublishesPrereleaseOnlyAfterAssetsComplete(t *testing.T)
 		if !strings.Contains(block, "- "+dep) {
 			t.Fatalf("finalize job must declare %q in needs so its gate sees all upstream results", dep)
 		}
+	}
+}
+
+func TestReleaseWorkflowMarksPrereleaseOnlyForPrereleaseTags(t *testing.T) {
+	data, err := os.ReadFile(".github/workflows/release.yml")
+	if err != nil {
+		t.Fatalf("read workflow: %v", err)
+	}
+	block := extractJobBlock(t, string(data), "finalize")
+
+	unconditional := `gh release edit "$TAG" --draft=false --prerelease=true`
+	if strings.Contains(block, unconditional) && !strings.Contains(block, "--prerelease=false") {
+		t.Fatal("finalize must not force every release to prerelease; v1.54/v1.55 stayed prerelease while the changelog already called them stable")
+	}
+	if !strings.Contains(block, "--prerelease=true") {
+		t.Fatal("finalize must still mark an actual prerelease tag as prerelease")
+	}
+	if !strings.Contains(block, "--prerelease=false") {
+		t.Fatal("finalize must publish a stable tag as a full release")
+	}
+	if !strings.Contains(block, "*-*") {
+		t.Fatal("finalize must decide prerelease from the tag (semver '-' channel), not unconditionally")
 	}
 }
 

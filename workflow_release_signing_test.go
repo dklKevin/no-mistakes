@@ -494,7 +494,7 @@ func TestReleaseWorkflowCleansUpKeychainAlways(t *testing.T) {
 
 // TestReleaseWorkflowPreservesArtifactContract pins the installer/updater and
 // checksum contracts: per-arch tarball names, an unchanged linux/windows path,
-// and finalize still publishing a prerelease.
+// and finalize publishing the draft only after assets land.
 func TestReleaseWorkflowPreservesArtifactContract(t *testing.T) {
 	wf := loadReleaseWorkflowDoc(t)
 
@@ -544,9 +544,12 @@ func TestReleaseWorkflowPreservesArtifactContract(t *testing.T) {
 		t.Error("checksums job must still compute `sha256sum no-mistakes-*`")
 	}
 
-	finalize := wf.jobByRunContains("--prerelease=true")
-	if finalize == nil || !wfContainsAll(finalize.allRun(), "--draft=false", "--prerelease=true") {
-		t.Error("finalize job must still run `gh release edit --draft=false --prerelease=true`")
+	finalize := wf.jobByRunContains("--draft=false")
+	if finalize == nil || !strings.Contains(finalize.allRun(), "gh release edit") {
+		t.Error("finalize job must still run `gh release edit --draft=false` after assets land")
+	}
+	if !wfContainsAll(finalize.allRun(), "--prerelease=true", "--prerelease=false") {
+		t.Error("finalize must mark prerelease only when the tag/channel is a prerelease")
 	}
 }
 

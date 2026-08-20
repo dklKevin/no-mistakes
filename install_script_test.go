@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -139,6 +141,159 @@ func TestPowerShellInstallScriptChecksDaemonRestartFailure(t *testing.T) {
 	}
 }
 
+func TestInstallScriptsPinReleaseAndRequireChecksums(t *testing.T) {
+	pinned := "v1.55.0"
+	scripts := []struct {
+		path          string
+		latestScrapes []string
+		pinnedURL     string
+		checksumsURL  string
+		hashAPI       string
+		mismatchFail  string
+		missingFail   string
+	}{
+		{
+			path:          filepath.Join("docs", "install.sh"),
+			latestScrapes: []string{"/releases/latest", "api.github.com"},
+			pinnedURL:     "https://github.com/${REPO}/releases/download/${VERSION}/",
+			checksumsURL:  "checksums.txt",
+			hashAPI:       "sha256",
+			mismatchFail:  "checksum mismatch",
+			missingFail:   "checksums.txt",
+		},
+		{
+			path:          filepath.Join("docs", "install.ps1"),
+			latestScrapes: []string{"/releases/latest", "api.github.com"},
+			pinnedURL:     "https://github.com/$repo/releases/download/$version/",
+			checksumsURL:  "checksums.txt",
+			hashAPI:       "Get-FileHash",
+			mismatchFail:  "checksum mismatch",
+			missingFail:   "checksums.txt",
+		},
+	}
+	for _, tc := range scripts {
+		data, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		for _, scrape := range tc.latestScrapes {
+			if strings.Contains(text, scrape) {
+				t.Errorf("%s must not scrape an unpinned latest release via %q", tc.path, scrape)
+			}
+		}
+		if !strings.Contains(text, pinned) {
+			t.Errorf("%s must pin the current release tag %s", tc.path, pinned)
+		}
+		if !strings.Contains(text, tc.pinnedURL) {
+			t.Errorf("%s must download from the pinned release URL %q", tc.path, tc.pinnedURL)
+		}
+		if !strings.Contains(text, tc.checksumsURL) {
+			t.Errorf("%s must download checksums.txt from the same pinned release", tc.path)
+		}
+		if !strings.Contains(strings.ToLower(text), strings.ToLower(tc.hashAPI)) {
+			t.Errorf("%s must verify the archive with %s", tc.path, tc.hashAPI)
+		}
+		if !strings.Contains(text, tc.mismatchFail) {
+			t.Errorf("%s must fail closed on a checksum mismatch", tc.path)
+		}
+		if !strings.Contains(text, tc.missingFail) {
+			t.Errorf("%s must mention checksums.txt when verification cannot proceed", tc.path)
+		}
+	}
+}
+
+func TestInstallScriptFailsWhenChecksumsMissing(t *testing.T) {
+	skipInstallScriptTestsOnWindows(t)
+
+	home := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "no-mistakes-v1.2.3-darwin-arm64.tar.gz")
+	makeInstallArchive(t, archivePath, "#!/bin/sh\nexit 0\n")
+	fakeBin := makeFakeInstallCommands(t)
+
+	output, err := runInstallScriptCommand(t, home, fakeBin, map[string]string{
+		"FAKE_RELEASE_ARCHIVE":   archivePath,
+		"FAKE_CHECKSUMS_MISSING": "1",
+	})
+	if err == nil {
+		t.Fatalf("install.sh should fail when checksums.txt cannot be downloaded\n%s", output)
+	}
+	if !strings.Contains(string(output), "checksums") {
+		t.Fatalf("install.sh should name checksums.txt in the failure, got:\n%s", output)
+	}
+	assertNotInstalled(t, home)
+}
+
+func TestInstallScriptFailsOnChecksumMismatch(t *testing.T) {
+	skipInstallScriptTestsOnWindows(t)
+
+	home := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "no-mistakes-v1.2.3-darwin-arm64.tar.gz")
+	makeInstallArchive(t, archivePath, "#!/bin/sh\nexit 0\n")
+	checksumsPath := filepath.Join(t.TempDir(), "checksums.txt")
+	if err := os.WriteFile(checksumsPath, []byte("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  no-mistakes-v1.2.3-darwin-arm64.tar.gz\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := makeFakeInstallCommands(t)
+
+	output, err := runInstallScriptCommand(t, home, fakeBin, map[string]string{
+		"FAKE_RELEASE_ARCHIVE": archivePath,
+		"FAKE_CHECKSUMS":       checksumsPath,
+	})
+	if err == nil {
+		t.Fatalf("install.sh should fail when checksums.txt does not match\n%s", output)
+	}
+	if !strings.Contains(string(output), "checksum mismatch") {
+		t.Fatalf("install.sh should report a checksum mismatch, got:\n%s", output)
+	}
+	assertNotInstalled(t, home)
+}
+
+func TestInstallScriptFailsWhenChecksumEntryMissing(t *testing.T) {
+	skipInstallScriptTestsOnWindows(t)
+
+	home := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "no-mistakes-v1.2.3-darwin-arm64.tar.gz")
+	makeInstallArchive(t, archivePath, "#!/bin/sh\nexit 0\n")
+	checksumsPath := filepath.Join(t.TempDir(), "checksums.txt")
+	if err := os.WriteFile(checksumsPath, []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  other-file.tar.gz\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := makeFakeInstallCommands(t)
+
+	output, err := runInstallScriptCommand(t, home, fakeBin, map[string]string{
+		"FAKE_RELEASE_ARCHIVE": archivePath,
+		"FAKE_CHECKSUMS":       checksumsPath,
+	})
+	if err == nil {
+		t.Fatalf("install.sh should fail when checksums.txt has no entry for the archive\n%s", output)
+	}
+	assertNotInstalled(t, home)
+}
+
+func TestInstallScriptAcceptsMatchingChecksums(t *testing.T) {
+	skipInstallScriptTestsOnWindows(t)
+
+	home := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "no-mistakes-v1.2.3-darwin-arm64.tar.gz")
+	binaryScript := "#!/bin/sh\nexit 0\n"
+	makeInstallArchive(t, archivePath, binaryScript)
+	checksumsPath := writeMatchingChecksums(t, archivePath)
+	fakeBin := makeFakeInstallCommands(t)
+	localBin := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	runInstallScript(t, home, fakeBin, map[string]string{
+		"FAKE_RELEASE_ARCHIVE": archivePath,
+		"FAKE_CHECKSUMS":       checksumsPath,
+	})
+
+	realBin := filepath.Join(home, ".no-mistakes", "bin", "no-mistakes")
+	assertFileContent(t, realBin, binaryScript)
+}
+
 func skipInstallScriptTestsOnWindows(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -156,6 +311,14 @@ func runInstallScript(t *testing.T, home, fakeBin string, extraEnv map[string]st
 
 func runInstallScriptCommand(t *testing.T, home, fakeBin string, extraEnv map[string]string) ([]byte, error) {
 	t.Helper()
+
+	if extraEnv == nil {
+		extraEnv = map[string]string{}
+	}
+	if extraEnv["NO_MISTAKES_VERSION"] == "" {
+		// Tests ship v1.2.3 archives; the installer pins a different default.
+		extraEnv["NO_MISTAKES_VERSION"] = "v1.2.3"
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -238,11 +401,40 @@ while [ "$#" -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
+case "$url" in
+  */releases/latest*|*/repos/*/releases/latest*)
+    echo "curl: unpinned latest scrape is forbidden" >&2
+    exit 1
+    ;;
+  *checksums.txt*)
+    if [ "${FAKE_CHECKSUMS_MISSING-}" = "1" ]; then
+      echo "curl: failed to download checksums.txt" >&2
+      exit 22
+    fi
+    if [ -n "${FAKE_CHECKSUMS-}" ]; then
+      if [ -n "$out" ]; then
+        cp "$FAKE_CHECKSUMS" "$out"
+      else
+        cat "$FAKE_CHECKSUMS"
+      fi
+      exit 0
+    fi
+    hash=$(sha256sum "$FAKE_RELEASE_ARCHIVE" | awk '{print $1}')
+    name=$(basename "$FAKE_RELEASE_ARCHIVE")
+    if [ -n "$out" ]; then
+      printf '%s  %s\n' "$hash" "$name" > "$out"
+    else
+      printf '%s  %s\n' "$hash" "$name"
+    fi
+    exit 0
+    ;;
+esac
 if [ -n "$out" ]; then
   cp "$FAKE_RELEASE_ARCHIVE" "$out"
   exit 0
 fi
-	printf '{"tag_name":"v1.2.3"}'
+echo "curl: unexpected unpinned request: $url" >&2
+exit 1
 `)
 	writeExecutable(t, filepath.Join(binDir, "sudo"), "#!/bin/sh\nexec \"$@\"\n")
 	return binDir
@@ -263,6 +455,29 @@ func assertFileContent(t *testing.T, path, want string) {
 	}
 	if string(data) != want {
 		t.Fatalf("file %s = %q, want %q", path, string(data), want)
+	}
+}
+
+func writeMatchingChecksums(t *testing.T, archivePath string) string {
+	t.Helper()
+	data, err := os.ReadFile(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	path := filepath.Join(t.TempDir(), "checksums.txt")
+	line := hex.EncodeToString(sum[:]) + "  " + filepath.Base(archivePath) + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func assertNotInstalled(t *testing.T, home string) {
+	t.Helper()
+	realBin := filepath.Join(home, ".no-mistakes", "bin", "no-mistakes")
+	if _, err := os.Stat(realBin); err == nil {
+		t.Fatalf("install.sh must not install a binary when checksum verification fails: %s exists", realBin)
 	}
 }
 

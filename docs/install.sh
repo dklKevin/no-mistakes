@@ -29,20 +29,69 @@ case "$ARCH" in
   *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-if [ -z "$VERSION" ]; then
-  echo "Could not determine latest release"
-  exit 1
-fi
+# Pin the release tag. Scraping GitHub's moving "latest" pointer is unpinned
+# and also skips prereleases, which is how 1.54/1.55 disappeared from the
+# installer. Override with NO_MISTAKES_VERSION only for a specific tag or tests.
+VERSION="${NO_MISTAKES_VERSION:-v1.55.0}"
+case "$VERSION" in
+  v[0-9]*.[0-9]*.[0-9]*)
+    case "$VERSION" in
+      */*|*" "*|*".."*)
+        echo "Invalid version: $VERSION"
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    echo "Invalid version: $VERSION (expected vMAJOR.MINOR.PATCH)"
+    exit 1
+    ;;
+esac
 
 FILENAME="no-mistakes-${VERSION}-${OS}-${ARCH}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/${VERSION}/${FILENAME}"
+CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "Downloading no-mistakes ${VERSION} for ${OS}/${ARCH}..."
 curl -fsSL "$URL" -o "${TMPDIR}/${FILENAME}"
+
+echo "Verifying checksums.txt..."
+if ! curl -fsSL "$CHECKSUMS_URL" -o "${TMPDIR}/checksums.txt"; then
+  echo "Failed to download checksums.txt for ${VERSION}"
+  exit 1
+fi
+if [ ! -s "${TMPDIR}/checksums.txt" ]; then
+  echo "checksums.txt for ${VERSION} is empty"
+  exit 1
+fi
+
+if ! expected="$(awk -v f="$FILENAME" '
+  $2 == f || $2 == ("*" f) { print $1; found=1; exit }
+  END { if (!found) exit 1 }
+' "${TMPDIR}/checksums.txt")"; then
+  echo "checksums.txt has no SHA-256 for ${FILENAME}"
+  exit 1
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "${TMPDIR}/${FILENAME}" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+  actual="$(shasum -a 256 "${TMPDIR}/${FILENAME}" | awk '{print $1}')"
+else
+  echo "Need sha256sum or shasum to verify checksums.txt"
+  exit 1
+fi
+
+expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
+actual="$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')"
+if [ -z "$expected" ] || [ "$actual" != "$expected" ]; then
+  echo "checksum mismatch for ${FILENAME}: got ${actual} want ${expected}"
+  exit 1
+fi
+
 tar xzf "${TMPDIR}/${FILENAME}" -C "$TMPDIR"
 
 if ! mkdir -p "$INSTALL_DIR"; then
