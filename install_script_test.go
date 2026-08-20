@@ -139,6 +139,146 @@ func TestPowerShellInstallScriptChecksDaemonRestartFailure(t *testing.T) {
 	}
 }
 
+func TestInstallScriptsFailClosedOnChecksumsAndPinReleaseURL(t *testing.T) {
+	for _, name := range []string{"install.sh", "install.ps1"} {
+		data, err := os.ReadFile(filepath.Join("docs", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if !strings.Contains(text, "checksums.txt") {
+			t.Fatalf("%s must download and check checksums.txt before installing", name)
+		}
+		if !strings.Contains(text, "releases/download/") {
+			t.Fatalf("%s must pin asset downloads to a versioned releases/download URL", name)
+		}
+		if strings.Contains(text, "releases/latest/download") {
+			t.Fatalf("%s must not download binaries from a floating /releases/latest URL", name)
+		}
+		if !strings.Contains(text, "NO_MISTAKES_VERSION") {
+			t.Fatalf("%s must honor NO_MISTAKES_VERSION so a release can be pinned without /releases/latest", name)
+		}
+		if name == "install.ps1" && !strings.Contains(text, "Get-FileHash") {
+			t.Fatalf("install.ps1 must verify the archive with Get-FileHash")
+		}
+	}
+}
+
+func TestInstallScriptFailsWhenChecksumsMissing(t *testing.T) {
+	skipInstallScriptTestsOnWindows(t)
+
+	home := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "no-mistakes-v1.2.3-darwin-arm64.tar.gz")
+	makeInstallArchive(t, archivePath, "#!/bin/sh\nexit 0\n")
+	fakeBin := makeFakeInstallCommands(t)
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runInstallScriptCommand(t, home, fakeBin, map[string]string{
+		"FAKE_RELEASE_ARCHIVE": archivePath,
+		"FAKE_MISSING_CHECKSUMS": "1",
+	})
+	if err == nil {
+		t.Fatalf("install.sh should fail when checksums.txt is missing\n%s", output)
+	}
+	if installed, statErr := os.Stat(filepath.Join(home, ".no-mistakes", "bin", "no-mistakes")); statErr == nil {
+		t.Fatalf("install.sh must not install a binary when checksums.txt is missing, found %s", installed.Name())
+	}
+}
+
+func TestInstallScriptFailsWhenChecksumMismatches(t *testing.T) {
+	skipInstallScriptTestsOnWindows(t)
+
+	home := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "no-mistakes-v1.2.3-darwin-arm64.tar.gz")
+	makeInstallArchive(t, archivePath, "#!/bin/sh\nexit 0\n")
+	checksumsPath := filepath.Join(t.TempDir(), "checksums.txt")
+	if err := os.WriteFile(checksumsPath, []byte("0000000000000000000000000000000000000000000000000000000000000000  no-mistakes-v1.2.3-darwin-arm64.tar.gz\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := makeFakeInstallCommands(t)
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runInstallScriptCommand(t, home, fakeBin, map[string]string{
+		"FAKE_RELEASE_ARCHIVE":   archivePath,
+		"FAKE_RELEASE_CHECKSUMS": checksumsPath,
+	})
+	if err == nil {
+		t.Fatalf("install.sh should fail when checksums.txt does not match\n%s", output)
+	}
+	if !strings.Contains(string(output), "checksum") {
+		t.Fatalf("install.sh should name the checksum failure, got:\n%s", output)
+	}
+	if installed, statErr := os.Stat(filepath.Join(home, ".no-mistakes", "bin", "no-mistakes")); statErr == nil {
+		t.Fatalf("install.sh must not install a binary after a checksum mismatch, found %s", installed.Name())
+	}
+}
+
+func TestInstallScriptFailsWhenChecksumEntryMissing(t *testing.T) {
+	skipInstallScriptTestsOnWindows(t)
+
+	home := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "no-mistakes-v1.2.3-darwin-arm64.tar.gz")
+	makeInstallArchive(t, archivePath, "#!/bin/sh\nexit 0\n")
+	checksumsPath := filepath.Join(t.TempDir(), "checksums.txt")
+	if err := os.WriteFile(checksumsPath, []byte("abcd  other-file.tar.gz\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := makeFakeInstallCommands(t)
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runInstallScriptCommand(t, home, fakeBin, map[string]string{
+		"FAKE_RELEASE_ARCHIVE":   archivePath,
+		"FAKE_RELEASE_CHECKSUMS": checksumsPath,
+	})
+	if err == nil {
+		t.Fatalf("install.sh should fail when checksums.txt has no entry for the archive\n%s", output)
+	}
+	if installed, statErr := os.Stat(filepath.Join(home, ".no-mistakes", "bin", "no-mistakes")); statErr == nil {
+		t.Fatalf("install.sh must not install a binary when the checksum entry is missing, found %s", installed.Name())
+	}
+}
+
+func TestInstallScriptPinsVersionedDownloadAndHonorsPinnedVersion(t *testing.T) {
+	skipInstallScriptTestsOnWindows(t)
+
+	home := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "no-mistakes-v9.9.9-darwin-arm64.tar.gz")
+	makeInstallArchive(t, archivePath, "#!/bin/sh\nexit 0\n")
+	curlLog := filepath.Join(t.TempDir(), "curl.log")
+	fakeBin := makeFakeInstallCommands(t)
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	runInstallScript(t, home, fakeBin, map[string]string{
+		"FAKE_RELEASE_ARCHIVE": archivePath,
+		"FAKE_CURL_LOG":        curlLog,
+		"NO_MISTAKES_VERSION":  "v9.9.9",
+		"FAKE_FAIL_LATEST":     "1",
+	})
+
+	data, err := os.ReadFile(curlLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logged := string(data)
+	if strings.Contains(logged, "/releases/latest") {
+		t.Fatalf("pinned install must not query /releases/latest, curl log:\n%s", logged)
+	}
+	if !strings.Contains(logged, "/releases/download/v9.9.9/no-mistakes-v9.9.9-darwin-arm64.tar.gz") {
+		t.Fatalf("pinned install must download the versioned archive, curl log:\n%s", logged)
+	}
+	if !strings.Contains(logged, "/releases/download/v9.9.9/checksums.txt") {
+		t.Fatalf("pinned install must download versioned checksums.txt, curl log:\n%s", logged)
+	}
+}
+
 func skipInstallScriptTestsOnWindows(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -161,7 +301,7 @@ func runInstallScriptCommand(t *testing.T, home, fakeBin string, extraEnv map[st
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", "docs/install.sh")
 	pathValue := strings.Join([]string{fakeBin, filepath.Join(home, ".local", "bin"), os.Getenv("PATH")}, string(os.PathListSeparator))
-	cmd.Env = append(filteredEnv(os.Environ(), "HOME", "PATH"), []string{
+	cmd.Env = append(filteredEnv(os.Environ(), "HOME", "PATH", "NO_MISTAKES_VERSION"), []string{
 		"HOME=" + home,
 		"PATH=" + pathValue,
 	}...)
@@ -238,11 +378,65 @@ while [ "$#" -gt 0 ]; do
     *) url="$1"; shift ;;
   esac
 done
-if [ -n "$out" ]; then
-  cp "$FAKE_RELEASE_ARCHIVE" "$out"
-  exit 0
+if [ -n "$FAKE_CURL_LOG" ]; then
+  printf '%s\n' "$url" >> "$FAKE_CURL_LOG"
 fi
-	printf '{"tag_name":"v1.2.3"}'
+case "$url" in
+  */releases/latest/download/*)
+    echo "refusing floating latest download: $url" >&2
+    exit 1
+    ;;
+  */releases/latest)
+    if [ -n "$FAKE_FAIL_LATEST" ]; then
+      echo "latest lookup disabled for pinned-version test" >&2
+      exit 1
+    fi
+    printf '{"tag_name":"v1.2.3"}'
+    exit 0
+    ;;
+  */checksums.txt)
+    if [ -z "$out" ]; then
+      echo "checksums download requires -o" >&2
+      exit 1
+    fi
+    if [ -n "$FAKE_MISSING_CHECKSUMS" ]; then
+      echo "checksums.txt is missing" >&2
+      exit 1
+    fi
+    if [ -n "$FAKE_RELEASE_CHECKSUMS" ] && [ -f "$FAKE_RELEASE_CHECKSUMS" ]; then
+      cp "$FAKE_RELEASE_CHECKSUMS" "$out"
+      exit 0
+    fi
+    if [ -z "$FAKE_RELEASE_ARCHIVE" ] || [ ! -f "$FAKE_RELEASE_ARCHIVE" ]; then
+      echo "missing archive for checksum generation" >&2
+      exit 1
+    fi
+    name="$(basename "$FAKE_RELEASE_ARCHIVE")"
+    if command -v sha256sum >/dev/null 2>&1; then
+      hash="$(sha256sum "$FAKE_RELEASE_ARCHIVE" | awk '{print $1}')"
+    else
+      hash="$(shasum -a 256 "$FAKE_RELEASE_ARCHIVE" | awk '{print $1}')"
+    fi
+    printf '%s  %s\n' "$hash" "$name" > "$out"
+    exit 0
+    ;;
+  */releases/download/*)
+    if [ -z "$out" ]; then
+      echo "archive download requires -o" >&2
+      exit 1
+    fi
+    if [ -z "$FAKE_RELEASE_ARCHIVE" ] || [ ! -f "$FAKE_RELEASE_ARCHIVE" ]; then
+      echo "missing FAKE_RELEASE_ARCHIVE" >&2
+      exit 1
+    fi
+    cp "$FAKE_RELEASE_ARCHIVE" "$out"
+    exit 0
+    ;;
+  *)
+    echo "unexpected curl url: $url" >&2
+    exit 1
+    ;;
+esac
 `)
 	writeExecutable(t, filepath.Join(binDir, "sudo"), "#!/bin/sh\nexec \"$@\"\n")
 	return binDir

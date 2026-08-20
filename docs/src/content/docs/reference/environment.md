@@ -102,6 +102,17 @@ Fallback GitHub token used by `no-mistakes update` when `GITHUB_TOKEN` is unset 
 
 See [`GITHUB_TOKEN`](#github_token) for the updater's authentication behavior and precedence.
 
+## `NO_MISTAKES_VERSION`
+
+Pin the official installer to a specific GitHub release tag.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | unset (installer looks up `/releases/latest`, then downloads that tag) |
+
+When set, `docs/install.sh` and `docs/install.ps1` skip GitHub's latest lookup and download `$NO_MISTAKES_VERSION` plus that release's `checksums.txt`. The archive is still refused unless the SHA-256 matches. The value must be a tag name (`v1.55.0`); path characters are rejected.
+
 ## `NO_MISTAKES_NO_UPDATE_CHECK`
 
 Disable background update checks.
